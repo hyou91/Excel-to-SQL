@@ -1,0 +1,39 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+
+a = Analysis(
+    ['C:\\Users\\alyousefh\\Desktop\\365DataSience\\Python\\VSC\\Excel to SQL\\VSC Excel to SQL Script Converter with GUI and Data Validation.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('Default_Excel_template_File.xlsx', '.')],
+    hiddenimports=['pandas', 'PyQt5'],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='VSC Excel to SQL Script Converter with GUI and Data Validation',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=['app.ico'],
+)
