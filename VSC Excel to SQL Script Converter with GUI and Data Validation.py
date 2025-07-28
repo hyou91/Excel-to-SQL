@@ -104,6 +104,69 @@ class DataHandler:
                 formatted_params[sp_param] = str_value
                 
         return skip_row, formatted_params, stats
+    
+    @staticmethod
+    def validate_row_by_index(row, column_indices, skip_arabic, validate_quality, arabic_pattern, sp_params):
+        """Validate row using column indices instead of attribute names"""
+        formatted_params = {}
+        skip_row = False
+        stats = {'skipped_arabic': 0, 'skipped_invalid_value': 0, 'skipped_empty': 0}
+        
+        for sp_param, col_index in column_indices.items():
+            # Access value by index position - this always works!
+            value = row[col_index]
+            
+            # Rest of validation logic remains the same...
+            if validate_quality and (pd.isna(value) or (isinstance(value, str) and value.strip().lower() in ['nan', 'none', ''])):
+                stats['skipped_empty'] += 1
+                skip_row = True
+                break
+                
+            if skip_arabic and isinstance(value, str) and arabic_pattern.search(str(value).strip()):
+                stats['skipped_arabic'] += 1
+                skip_row = True
+                break
+                
+            if sp_param in ['item', 'Status']:
+                str_value = str(value).strip().replace("'", "''")
+                formatted_params[sp_param] = str_value
+                
+            elif sp_param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'new_Showroom']:
+                try:
+                    if isinstance(value, str):
+                        clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
+                        if validate_quality and (not clean_value or clean_value.lower() in ['n/a', 'na', 'null', 'none']):
+                            stats['skipped_invalid_value'] += 1
+                            skip_row = True
+                            break
+                        numeric_value = float(clean_value)
+                    else:
+                        numeric_value = float(value)
+                        
+                    if validate_quality and numeric_value < 0 and sp_param in ['qty', 'New_Current_Cost', 'new_Showroom']:
+                        logging.debug(f"Negative value detected for {sp_param}: {numeric_value}")
+                        stats['skipped_invalid_value'] += 1
+                        skip_row = True
+                        break
+                        
+                    formatted_params[sp_param] = numeric_value
+                    
+                except (ValueError, AttributeError, TypeError) as e:
+                    if validate_quality:
+                        logging.debug(f"Invalid numeric value for {sp_param}: '{value}' - {str(e)}")
+                        stats['skipped_invalid_value'] += 1
+                        skip_row = True
+                        break
+                    else:
+                        formatted_params[sp_param] = str(value) if value is not None else '0'
+                        
+            else:
+                str_value = str(value).strip().replace("'", "''")
+                formatted_params[sp_param] = str_value
+                
+        return skip_row, formatted_params, stats
+    
+    
 
 # --- Worker: QThread for heavy tasks (Excel loading, SQL generation) ---
 class ExcelLoaderWorker(QThread):
@@ -147,16 +210,27 @@ class SQLGeneratorWorker(QThread):
                 'skipped_empty': 0,
                 'processing_time': 0
             }
+            
+            # Convert column names to indices for reliable access
+            column_indices = {}
+            df_columns = list(self.df.columns)
+            for sp_param, excel_col in self.column_mappings.items():
+                if excel_col in df_columns:
+                    column_indices[sp_param] = df_columns.index(excel_col)
+                else:
+                    raise ValueError(f"Column '{excel_col}' not found in DataFrame columns: {df_columns}")
+            
             # Use itertuples for performance
             for idx, row in enumerate(self.df.itertuples(index=False), 1):
                 progress = int((idx / total_rows) * 100)
                 self.progress.emit(progress)
                 if idx % 100 == 0:
                     self.status_update.emit(f"Processing row {idx} of {total_rows}")
-                skip_row, formatted_params, row_stats = DataHandler.validate_row(
-                    row, self.column_mappings, self.skip_arabic, self.validate_quality, arabic_pattern, self.sp_details['parameters']
-   
+                
+                skip_row, formatted_params, row_stats = DataHandler.validate_row_by_index(
+                    row, column_indices, self.skip_arabic, self.validate_quality, arabic_pattern, self.sp_details['parameters']
                 )
+                
                 stats['skipped_arabic'] += row_stats['skipped_arabic']
                 stats['skipped_invalid_value'] += row_stats['skipped_invalid_value']
                 stats['skipped_empty'] += row_stats['skipped_empty']
@@ -306,7 +380,7 @@ class MainWindow(QWidget):
                 "friendly_name": "Update Items Current Cost"
             },
             "Update Items Status": {
-                "sql_template": "UPDATE IV00101 SET USCATVLS_6 = '{Status}' WHERE ITEMNMBR = '{item}'",
+                "sql_template": "UPDATE IV00101 SET USCATVLS_6 = '{Status}', INACTIVE = 1, ITEMTYPE = 2 WHERE ITEMNMBR = '{item}'",
                 "parameters": ["item", "Status"],
                 "friendly_name": "Update Items Status"
             },
@@ -685,6 +759,238 @@ class MainWindow(QWidget):
                 f"Processed: {entry['processed_rows']} rows"
             )
             self.history_list.addItem(item_text)
+    # Add this method to MainWindow class around line 575
+
+def validate_column_mappings(self, column_mappings):
+    """Validate that column mappings make sense based on data types"""
+    
+    if not self.current_df or self.current_df.empty:
+        return True, ""
+    
+    validation_errors = []
+    sample_size = min(100, len(self.current_df))  # Check first 100 rows for performance
+    df_sample = self.current_df.head(sample_size)
+    
+    for param, excel_col in column_mappings.items():
+        if excel_col == "-- Select Column --":
+            continue
+            
+        try:
+            # Get the actual column data
+            if excel_col not in df_sample.columns:
+                validation_errors.append(f"Column '{excel_col}' not found in Excel sheet")
+                continue
+                
+            column_data = df_sample[excel_col].dropna()  # Remove NaN for analysis
+            
+            if column_data.empty:
+                validation_errors.append(f"Column '{excel_col}' mapped to '{param}' contains only empty values")
+                continue
+            
+            # Validate based on parameter type
+            if param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'new_Showroom']:
+                # Should be numeric
+                numeric_count = 0
+                non_numeric_examples = []
+                
+                for idx, value in column_data.head(20).items():  # Check first 20 non-null values
+                    try:
+                        if isinstance(value, str):
+                            # Try to clean and convert
+                            clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
+                            float(clean_value)
+                        else:
+                            float(value)
+                        numeric_count += 1
+                    except (ValueError, TypeError):
+                        if len(non_numeric_examples) < 3:  # Collect up to 3 examples
+                            non_numeric_examples.append(str(value)[:20])  # Truncate long values
+                
+                # If less than 70% are numeric, warn user
+                if numeric_count < len(column_data.head(20)) * 0.7:
+                    examples_str = ", ".join(f"'{ex}'" for ex in non_numeric_examples)
+                    validation_errors.append(
+                        f"Parameter '{param}' expects numeric values, but column '{excel_col}' contains "
+                        f"non-numeric data. Examples: {examples_str}"
+                    )
+                    
+            elif param in ['item', 'Status']:
+                # Should be text-like
+                text_count = 0
+                for value in column_data.head(10):
+                    if isinstance(value, (str, int, float)) and str(value).strip():
+                        text_count += 1
+                
+                if text_count == 0:
+                    validation_errors.append(
+                        f"Parameter '{param}' expects text values, but column '{excel_col}' appears to be empty or invalid"
+                    )
+                    
+        except Exception as e:
+            validation_errors.append(f"Error analyzing column '{excel_col}' for parameter '{param}': {str(e)}")
+    
+    if validation_errors:
+        error_message = "Column Mapping Issues Found:\n\n" + "\n".join(f"• {error}" for error in validation_errors)
+        error_message += "\n\nPlease review your column mappings and try again."
+        return False, error_message
+    
+    return True, ""
+
+# Update the generate_sql method in AppController around line 850
+
+def generate_sql(self):
+    if self.sql_generator_thread and self.sql_generator_thread.isRunning():
+        QMessageBox.warning(self.window, "Processing in Progress", "A script generation is already in progress. Please wait.")
+        return
+    if self.window.current_df is None or self.window.current_df.empty:
+        QMessageBox.warning(self.window, "No Data", "Please load an Excel file and select a sheet with data first.")
+        return
+    output_path = self.window.output_path_input.text()
+    if not output_path:
+        QMessageBox.warning(self.window, "Output File Missing", "Please specify an output SQL file path.")
+        return
+    selected_sp_friendly_name = self.window.sp_selector.currentText()
+    sp_details = self.window.stored_procedures.get(selected_sp_friendly_name)
+    if not sp_details:
+        QMessageBox.critical(self.window, "Invalid Stored Procedure", "Selected Stored Procedure definition not found.")
+        return
+    column_mappings = {}
+    all_mappings_selected = True
+    for param, combo in self.window.param_column_combos.items():
+        selected_excel_col = combo.currentText()
+        if selected_excel_col == "-- Select Column --":
+            QMessageBox.warning(self.window, "Column Mapping Missing", f"Please map a column for '{param.replace('_', ' ').title()}'.")
+            all_mappings_selected = False
+            break
+        column_mappings[param] = selected_excel_col
+    if not all_mappings_selected:
+        return
+    required_params = set(sp_details['parameters'])
+    mapped_params = set(column_mappings.keys())
+    if not required_params.issubset(mapped_params):
+        missing_params = required_params - mapped_params
+        QMessageBox.critical(self.window, "Missing Mappings",
+                             f"Not all required parameters for '{selected_sp_friendly_name}' are mapped. Missing: {', '.join(missing_params)}")
+        return
+    
+    # NEW: Validate column mappings before processing
+    is_valid, error_message = self.window.validate_column_mappings(column_mappings)
+    if not is_valid:
+        msg_box = QMessageBox(self.window)
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle("Column Mapping Validation")
+        msg_box.setText("There are issues with your column mappings:")
+        msg_box.setDetailedText(error_message)
+        msg_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Ignore)
+        msg_box.setDefaultButton(QMessageBox.Ok)
+        
+        result = msg_box.exec_()
+        if result == QMessageBox.Ok:
+            return  # User wants to fix mappings
+        # If user clicks Ignore, continue processing
+    
+    self.window.text_output.append(f"Starting SQL generation for '{selected_sp_friendly_name}'...")
+    self.window.progress_bar.setValue(0)
+    self.window.progress_bar.show()
+    self.window.status_label.setText("Initializing processing...")
+    self.window.status_label.show()
+    self.window.generate_button.setEnabled(False)
+    self.sql_generator_thread = SQLGeneratorWorker(
+        df=self.window.current_df,
+        sheet_name=self.window.selected_sheet_name,
+        sp_details=sp_details,
+        column_mappings=column_mappings,
+        output_path=output_path,
+        skip_arabic=self.window.skip_arabic_check.isChecked(),
+        validate_quality=self.window.validate_data_check.isChecked()
+    )
+    self.sql_generator_thread.progress.connect(self.window.progress_bar.setValue)
+    self.sql_generator_thread.status_update.connect(self.window.status_label.setText)
+    self.sql_generator_thread.finished.connect(self.on_processing_finished)
+    self.sql_generator_thread.error.connect(self.on_processing_error)
+    self.sql_generator_thread.start()
+
+# Also add the safe column name handling to validate_row method (update around line 47)
+
+@staticmethod
+def validate_row(row, column_mappings, skip_arabic, validate_quality, arabic_pattern, sp_params):
+    formatted_params = {}
+    skip_row = False
+    stats = {'skipped_arabic': 0, 'skipped_invalid_value': 0, 'skipped_empty': 0}
+    
+    for sp_param, excel_col in column_mappings.items():
+        # Try to get the value with safe column name handling
+        value = None
+        possible_names = [
+            excel_col,  # Original name
+            excel_col.replace(' ', '_'),  # Space to underscore
+            excel_col.replace('.', '_'),  # Dot to underscore  
+            excel_col.replace(' ', '_').replace('.', '_'),  # Both
+            re.sub(r'[^\w]', '_', excel_col),  # All special chars to underscore
+        ]
+        
+        for name in possible_names:
+            try:
+                value = getattr(row, name)
+                break
+            except AttributeError:
+                continue
+        
+        if value is None:
+            # Last resort: show available attributes for debugging
+            available_attrs = [attr for attr in dir(row) if not attr.startswith('_') and not callable(getattr(row, attr))]
+            raise ValueError(f"Column '{excel_col}' not accessible. Available columns: {available_attrs[:10]}...")
+        
+        # Rest of validation logic remains the same...
+        if validate_quality and (pd.isna(value) or (isinstance(value, str) and value.strip().lower() in ['nan', 'none', ''])):
+            stats['skipped_empty'] += 1
+            skip_row = True
+            break
+            
+        if skip_arabic and isinstance(value, str) and arabic_pattern.search(str(value).strip()):
+            stats['skipped_arabic'] += 1
+            skip_row = True
+            break
+            
+        if sp_param in ['item', 'Status']:
+            str_value = str(value).strip().replace("'", "''")
+            formatted_params[sp_param] = str_value
+            
+        elif sp_param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'new_Showroom']:
+            try:
+                if isinstance(value, str):
+                    clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
+                    if validate_quality and (not clean_value or clean_value.lower() in ['n/a', 'na', 'null', 'none']):
+                        stats['skipped_invalid_value'] += 1
+                        skip_row = True
+                        break
+                    numeric_value = float(clean_value)
+                else:
+                    numeric_value = float(value)
+                    
+                if validate_quality and numeric_value < 0 and sp_param in ['qty', 'New_Current_Cost', 'new_Showroom']:
+                    logging.debug(f"Negative value detected for {sp_param}: {numeric_value}")
+                    stats['skipped_invalid_value'] += 1
+                    skip_row = True
+                    break
+                    
+                formatted_params[sp_param] = numeric_value
+                
+            except (ValueError, AttributeError, TypeError) as e:
+                if validate_quality:
+                    logging.debug(f"Invalid numeric value for {sp_param}: '{value}' - {str(e)}")
+                    stats['skipped_invalid_value'] += 1
+                    skip_row = True
+                    break
+                else:
+                    formatted_params[sp_param] = str(value) if value is not None else '0'
+                    
+        else:
+            str_value = str(value).strip().replace("'", "''")
+            formatted_params[sp_param] = str_value
+            
+    return skip_row, formatted_params, stats        
+            
 
 # --- AppController: Connects everything, handles events, signals, slots ---
 class AppController:
