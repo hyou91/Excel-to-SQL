@@ -393,6 +393,9 @@ class MainWindow(QWidget):
         self.color_delegate = ColorDelegate()
         self.param_column_combos = {}
         self.mapping_widgets_layout = QFormLayout()
+        # Status-specific additional options
+        self.inactive_combo = None
+        self.itemtype_combo = None
         self.load_settings()
         self.init_ui()
         self.setup_menu()
@@ -667,13 +670,20 @@ class MainWindow(QWidget):
         self.selected_sheet_name = self.sheet_selector.currentText()
         self.reload_sheet_data()
     def on_sp_changed(self):
+        # Clear existing mappings
         while self.mapping_widgets_layout.count():
             item = self.mapping_widgets_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self.param_column_combos.clear()
+        
+        # Clear status-specific widgets
+        self.inactive_combo = None
+        self.itemtype_combo = None
+
         selected_sp_friendly_name = self.sp_selector.currentText()
         sp_details = self.stored_procedures.get(selected_sp_friendly_name)
+        
         if sp_details:
             parameters = sp_details['parameters']
             for param in parameters:
@@ -687,8 +697,23 @@ class MainWindow(QWidget):
                         if col_name.lower() == param.lower():
                             combo.setCurrentIndex(i + 1)
                             break
+            
+            # Add special options for "Update Items Status"
+            if selected_sp_friendly_name == "Update Items Status":
+                # INACTIVE dropdown
+                inactive_label = QLabel("INACTIVE Status:")
+                self.inactive_combo = QComboBox()
+                self.inactive_combo.addItems(["-- Select Value --", "0: Active", "1: Inactive"])
+                self.mapping_widgets_layout.addRow(inactive_label, self.inactive_combo)
+                
+                # ITEMTYPE dropdown
+                itemtype_label = QLabel("ITEMTYPE:")
+                self.itemtype_combo = QComboBox()
+                self.itemtype_combo.addItems(["-- Select Value --", "1: Sales Inventory", "2: Discontinued"])
+                self.mapping_widgets_layout.addRow(itemtype_label, self.itemtype_combo)
         else:
             self.text_output.append(f"Warning: Stored procedure '{selected_sp_friendly_name}' not found in definitions.")
+        
         self.generate_button.setEnabled(bool(self.current_df_columns) and bool(sp_details))
     def update_preview(self):
         if self.selected_sheet_name and self.selected_sheet_name in self.df_all_sheets:
@@ -836,79 +861,88 @@ def validate_column_mappings(self, column_mappings):
     
     return True, ""
 
-# Update the generate_sql method in AppController around line 850
-
 def generate_sql(self):
-    if self.sql_generator_thread and self.sql_generator_thread.isRunning():
-        QMessageBox.warning(self.window, "Processing in Progress", "A script generation is already in progress. Please wait.")
-        return
-    if self.window.current_df is None or self.window.current_df.empty:
-        QMessageBox.warning(self.window, "No Data", "Please load an Excel file and select a sheet with data first.")
-        return
-    output_path = self.window.output_path_input.text()
-    if not output_path:
-        QMessageBox.warning(self.window, "Output File Missing", "Please specify an output SQL file path.")
-        return
-    selected_sp_friendly_name = self.window.sp_selector.currentText()
-    sp_details = self.window.stored_procedures.get(selected_sp_friendly_name)
-    if not sp_details:
-        QMessageBox.critical(self.window, "Invalid Stored Procedure", "Selected Stored Procedure definition not found.")
-        return
-    column_mappings = {}
-    all_mappings_selected = True
-    for param, combo in self.window.param_column_combos.items():
-        selected_excel_col = combo.currentText()
-        if selected_excel_col == "-- Select Column --":
-            QMessageBox.warning(self.window, "Column Mapping Missing", f"Please map a column for '{param.replace('_', ' ').title()}'.")
-            all_mappings_selected = False
-            break
-        column_mappings[param] = selected_excel_col
-    if not all_mappings_selected:
-        return
-    required_params = set(sp_details['parameters'])
-    mapped_params = set(column_mappings.keys())
-    if not required_params.issubset(mapped_params):
-        missing_params = required_params - mapped_params
-        QMessageBox.critical(self.window, "Missing Mappings",
-                             f"Not all required parameters for '{selected_sp_friendly_name}' are mapped. Missing: {', '.join(missing_params)}")
-        return
-    
-    # NEW: Validate column mappings before processing
-    is_valid, error_message = self.window.validate_column_mappings(column_mappings)
-    if not is_valid:
-        msg_box = QMessageBox(self.window)
-        msg_box.setIcon(QMessageBox.Warning)
-        msg_box.setWindowTitle("Column Mapping Validation")
-        msg_box.setText("There are issues with your column mappings:")
-        msg_box.setDetailedText(error_message)
-        msg_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Ignore)
-        msg_box.setDefaultButton(QMessageBox.Ok)
-        
-        result = msg_box.exec_()
-        if result == QMessageBox.Ok:
-            return  # User wants to fix mappings
-        # If user clicks Ignore, continue processing
-    
-    self.window.text_output.append(f"Starting SQL generation for '{selected_sp_friendly_name}'...")
-    self.window.progress_bar.setValue(0)
-    self.window.progress_bar.show()
-    self.window.status_label.setText("Initializing processing...")
-    self.window.status_label.show()
-    self.window.generate_button.setEnabled(False)
-    self.sql_generator_thread = SQLGeneratorWorker(
-        df=self.window.current_df,
-        sheet_name=self.window.selected_sheet_name,
-        sp_details=sp_details,
-        column_mappings=column_mappings,
-        output_path=output_path,
-        skip_arabic=self.window.skip_arabic_check.isChecked(),
-        validate_quality=self.window.validate_data_check.isChecked()
-    )
-    self.sql_generator_thread.progress.connect(self.window.progress_bar.setValue)
-    self.sql_generator_thread.status_update.connect(self.window.status_label.setText)
-    self.sql_generator_thread.finished.connect(self.on_processing_finished)
-    self.sql_generator_thread.error.connect(self.on_processing_error)
-    self.sql_generator_thread.start()
+        if self.sql_generator_thread and self.sql_generator_thread.isRunning():
+            QMessageBox.warning(self.window, "Processing in Progress", "A script generation is already in progress. Please wait.")
+            return
+        if self.window.current_df is None or self.window.current_df.empty:
+            QMessageBox.warning(self.window, "No Data", "Please load an Excel file and select a sheet with data first.")
+            return
+        output_path = self.window.output_path_input.text()
+        if not output_path:
+            QMessageBox.warning(self.window, "Output File Missing", "Please specify an output SQL file path.")
+            return
+        selected_sp_friendly_name = self.window.sp_selector.currentText()
+        sp_details = self.window.stored_procedures.get(selected_sp_friendly_name)
+        if not sp_details:
+            QMessageBox.critical(self.window, "Invalid Stored Procedure", "Selected Stored Procedure definition not found.")
+            return
+
+        # Handle special case for "Update Items Status"
+        if selected_sp_friendly_name == "Update Items Status":
+            # Check if additional options are selected
+            inactive_selected = self.window.inactive_combo.currentText() if self.window.inactive_combo else "-- Select Value --"
+            itemtype_selected = self.window.itemtype_combo.currentText() if self.window.itemtype_combo else "-- Select Value --"
+            
+            # Create modified sp_details based on selections
+            sp_details = sp_details.copy()  # Don't modify original
+            
+            if inactive_selected != "-- Select Value --" or itemtype_selected != "-- Select Value --":
+                # Build dynamic SQL template
+                sql_parts = ["UPDATE IV00101 SET USCATVLS_6 = '{Status}'"]
+                
+                if inactive_selected != "-- Select Value --":
+                    inactive_value = inactive_selected.split(":")[0]  # Extract "0" or "1"
+                    sql_parts.append(f"INACTIVE = {inactive_value}")
+                
+                if itemtype_selected != "-- Select Value --":
+                    itemtype_value = itemtype_selected.split(":")[0]  # Extract "1" or "2"
+                    sql_parts.append(f"ITEMTYPE = {itemtype_value}")
+                
+                sql_parts.append("WHERE ITEMNMBR = '{item}'")
+                sp_details['sql_template'] = ", ".join(sql_parts[:-1]) + " " + sql_parts[-1]
+            # If both are "-- Select Value --", keep the original template which is the default
+
+        column_mappings = {}
+        all_mappings_selected = True
+        for param, combo in self.window.param_column_combos.items():
+            selected_excel_col = combo.currentText()
+            if selected_excel_col == "-- Select Column --":
+                QMessageBox.warning(self.window, "Column Mapping Missing", f"Please map a column for '{param.replace('_', ' ').title()}'.")
+                all_mappings_selected = False
+                break
+            column_mappings[param] = selected_excel_col
+        if not all_mappings_selected:
+            return
+
+        required_params = set(sp_details['parameters'])
+        mapped_params = set(column_mappings.keys())
+        if not required_params.issubset(mapped_params):
+            missing_params = required_params - mapped_params
+            QMessageBox.critical(self.window, "Missing Mappings",
+                                 f"Not all required parameters for '{selected_sp_friendly_name}' are mapped. Missing: {', '.join(missing_params)}")
+            return
+
+        self.window.text_output.append(f"Starting SQL generation for '{selected_sp_friendly_name}'...")
+        self.window.progress_bar.setValue(0)
+        self.window.progress_bar.show()
+        self.window.status_label.setText("Initializing processing...")
+        self.window.status_label.show()
+        self.window.generate_button.setEnabled(False)
+        self.sql_generator_thread = SQLGeneratorWorker(
+            df=self.window.current_df,
+            sheet_name=self.window.selected_sheet_name,
+            sp_details=sp_details,
+            column_mappings=column_mappings,
+            output_path=output_path,
+            skip_arabic=self.window.skip_arabic_check.isChecked(),
+            validate_quality=self.window.validate_data_check.isChecked()
+        )
+        self.sql_generator_thread.progress.connect(self.window.progress_bar.setValue)
+        self.sql_generator_thread.status_update.connect(self.window.status_label.setText)
+        self.sql_generator_thread.finished.connect(self.on_processing_finished)
+        self.sql_generator_thread.error.connect(self.on_processing_error)
+        self.sql_generator_thread.start()
 
 # Also add the safe column name handling to validate_row method (update around line 47)
 
