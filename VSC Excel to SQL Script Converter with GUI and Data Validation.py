@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSettings
 from PyQt5.QtGui import QColor
 import logging
+from typing import List, Dict
 
 def resource_path(relative_path):
     """Get absolute path to resource, works for dev and for PyInstaller"""
@@ -59,12 +60,12 @@ class DataHandler:
                 break
                 
             # Handle string parameters
-            if sp_param in ['item', 'Status']:
+            if sp_param in ['Item', 'Status']:
                 str_value = str(value).strip().replace("'", "''")
                 formatted_params[sp_param] = str_value
                 
             # Handle numeric parameters - validation controlled by validate_quality
-            elif sp_param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'new_Showroom']:
+            elif sp_param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'New_Showroom']:
                 try:
                     if isinstance(value, str):
                         clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
@@ -80,7 +81,7 @@ class DataHandler:
                         numeric_value = float(value)
                         
                     # Validate range - ONLY if validation is enabled
-                    if validate_quality and numeric_value < 0 and sp_param in ['qty', 'New_Current_Cost', 'new_Showroom']:
+                    if validate_quality and numeric_value < 0 and sp_param in ['qty', 'New_Current_Cost', 'New_Showroom']:
                         logging.debug(f"Negative value detected for {sp_param}: {numeric_value}")
                         stats['skipped_invalid_value'] += 1
                         skip_row = True
@@ -127,11 +128,11 @@ class DataHandler:
                 skip_row = True
                 break
                 
-            if sp_param in ['item', 'Status']:
+            if sp_param in ['Item', 'Status']:
                 str_value = str(value).strip().replace("'", "''")
                 formatted_params[sp_param] = str_value
                 
-            elif sp_param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'new_Showroom']:
+            elif sp_param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'New_Showroom']:
                 try:
                     if isinstance(value, str):
                         clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
@@ -143,7 +144,7 @@ class DataHandler:
                     else:
                         numeric_value = float(value)
                         
-                    if validate_quality and numeric_value < 0 and sp_param in ['qty', 'New_Current_Cost', 'new_Showroom']:
+                    if validate_quality and numeric_value < 0 and sp_param in ['qty', 'New_Current_Cost', 'New_Showroom']:
                         logging.debug(f"Negative value detected for {sp_param}: {numeric_value}")
                         stats['skipped_invalid_value'] += 1
                         skip_row = True
@@ -385,8 +386,8 @@ class MainWindow(QWidget):
                 "friendly_name": "Update Items Status"
             },
             "Update Items Prices": {
-                "sql_template": "EXEC [dbo].[HYOU_SP_UPDATE_Item_Price_IV00108&More] @ITEMNMBR = '{item}', @PRCLEVEL = 'SHOWROOM', @PRICE = {new_Showroom:.3f}",
-                "parameters": ["item", "new_Showroom"],
+                "sql_template": "EXEC [dbo].[HYOU_SP_UPDATE_Item_Price_IV00108&More] @ITEMNMBR = '{item}', @PRCLEVEL = 'SHOWROOM', @PRICE = {New_Showroom:.3f}",
+                "parameters": ["item", "New_Showroom"],
                 "friendly_name": "Update Items Prices"
             }
         }
@@ -813,7 +814,7 @@ def validate_column_mappings(self, column_mappings):
                 continue
             
             # Validate based on parameter type
-            if param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'new_Showroom']:
+            if param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'New_Showroom']:
                 # Should be numeric
                 numeric_count = 0
                 non_numeric_examples = []
@@ -839,7 +840,7 @@ def validate_column_mappings(self, column_mappings):
                         f"non-numeric data. Examples: {examples_str}"
                     )
                     
-            elif param in ['item', 'Status']:
+            elif param in ['Item', 'Status']:
                 # Should be text-like
                 text_count = 0
                 for value in column_data.head(10):
@@ -861,225 +862,99 @@ def validate_column_mappings(self, column_mappings):
     
     return True, ""
 
-def generate_sql(self):
-        if self.sql_generator_thread and self.sql_generator_thread.isRunning():
-            QMessageBox.warning(self.window, "Processing in Progress", "A script generation is already in progress. Please wait.")
-            return
-        if self.window.current_df is None or self.window.current_df.empty:
-            QMessageBox.warning(self.window, "No Data", "Please load an Excel file and select a sheet with data first.")
-            return
-        output_path = self.window.output_path_input.text()
-        if not output_path:
-            QMessageBox.warning(self.window, "Output File Missing", "Please specify an output SQL file path.")
-            return
-        selected_sp_friendly_name = self.window.sp_selector.currentText()
-        sp_details = self.window.stored_procedures.get(selected_sp_friendly_name)
-        if not sp_details:
-            QMessageBox.critical(self.window, "Invalid Stored Procedure", "Selected Stored Procedure definition not found.")
-            return
-
-        # Handle special case for "Update Items Status"
-        if selected_sp_friendly_name == "Update Items Status":
-            # Check if additional options are selected
-            inactive_selected = self.window.inactive_combo.currentText() if self.window.inactive_combo else "-- Select Value --"
-            itemtype_selected = self.window.itemtype_combo.currentText() if self.window.itemtype_combo else "-- Select Value --"
-            
-            # Create modified sp_details based on selections
-            sp_details = sp_details.copy()  # Don't modify original
-            
-            if inactive_selected != "-- Select Value --" or itemtype_selected != "-- Select Value --":
-                # Build dynamic SQL template
-                sql_parts = ["UPDATE IV00101 SET USCATVLS_6 = '{Status}'"]
-                
-                if inactive_selected != "-- Select Value --":
-                    inactive_value = inactive_selected.split(":")[0]  # Extract "0" or "1"
-                    sql_parts.append(f"INACTIVE = {inactive_value}")
-                
-                if itemtype_selected != "-- Select Value --":
-                    itemtype_value = itemtype_selected.split(":")[0]  # Extract "1" or "2"
-                    sql_parts.append(f"ITEMTYPE = {itemtype_value}")
-                
-                sql_parts.append("WHERE ITEMNMBR = '{item}'")
-                sp_details['sql_template'] = ", ".join(sql_parts[:-1]) + " " + sql_parts[-1]
-            # If both are "-- Select Value --", keep the original template which is the default
-
-        column_mappings = {}
-        all_mappings_selected = True
-        for param, combo in self.window.param_column_combos.items():
-            selected_excel_col = combo.currentText()
-            if selected_excel_col == "-- Select Column --":
-                QMessageBox.warning(self.window, "Column Mapping Missing", f"Please map a column for '{param.replace('_', ' ').title()}'.")
-                all_mappings_selected = False
-                break
-            column_mappings[param] = selected_excel_col
-        if not all_mappings_selected:
-            return
-
-        required_params = set(sp_details['parameters'])
-        mapped_params = set(column_mappings.keys())
-        if not required_params.issubset(mapped_params):
-            missing_params = required_params - mapped_params
-            QMessageBox.critical(self.window, "Missing Mappings",
-                                 f"Not all required parameters for '{selected_sp_friendly_name}' are mapped. Missing: {', '.join(missing_params)}")
-            return
-
-        self.window.text_output.append(f"Starting SQL generation for '{selected_sp_friendly_name}'...")
-        self.window.progress_bar.setValue(0)
-        self.window.progress_bar.show()
-        self.window.status_label.setText("Initializing processing...")
-        self.window.status_label.show()
-        self.window.generate_button.setEnabled(False)
-        self.sql_generator_thread = SQLGeneratorWorker(
-            df=self.window.current_df,
-            sheet_name=self.window.selected_sheet_name,
-            sp_details=sp_details,
-            column_mappings=column_mappings,
-            output_path=output_path,
-            skip_arabic=self.window.skip_arabic_check.isChecked(),
-            validate_quality=self.window.validate_data_check.isChecked()
-        )
-        self.sql_generator_thread.progress.connect(self.window.progress_bar.setValue)
-        self.sql_generator_thread.status_update.connect(self.window.status_label.setText)
-        self.sql_generator_thread.finished.connect(self.on_processing_finished)
-        self.sql_generator_thread.error.connect(self.on_processing_error)
-        self.sql_generator_thread.start()
-
-# Also add the safe column name handling to validate_row method (update around line 47)
-
-@staticmethod
-def validate_row(row, column_mappings, skip_arabic, validate_quality, arabic_pattern, sp_params):
-    formatted_params = {}
-    skip_row = False
-    stats = {'skipped_arabic': 0, 'skipped_invalid_value': 0, 'skipped_empty': 0}
-    
-    for sp_param, excel_col in column_mappings.items():
-        # Try to get the value with safe column name handling
-        value = None
-        possible_names = [
-            excel_col,  # Original name
-            excel_col.replace(' ', '_'),  # Space to underscore
-            excel_col.replace('.', '_'),  # Dot to underscore  
-            excel_col.replace(' ', '_').replace('.', '_'),  # Both
-            re.sub(r'[^\w]', '_', excel_col),  # All special chars to underscore
-        ]
-        
-        for name in possible_names:
-            try:
-                value = getattr(row, name)
-                break
-            except AttributeError:
-                continue
-        
-        if value is None:
-            # Last resort: show available attributes for debugging
-            available_attrs = [attr for attr in dir(row) if not attr.startswith('_') and not callable(getattr(row, attr))]
-            raise ValueError(f"Column '{excel_col}' not accessible. Available columns: {available_attrs[:10]}...")
-        
-        # Rest of validation logic remains the same...
-        if validate_quality and (pd.isna(value) or (isinstance(value, str) and value.strip().lower() in ['nan', 'none', ''])):
-            stats['skipped_empty'] += 1
-            skip_row = True
-            break
-            
-        if skip_arabic and isinstance(value, str) and arabic_pattern.search(str(value).strip()):
-            stats['skipped_arabic'] += 1
-            skip_row = True
-            break
-            
-        if sp_param in ['item', 'Status']:
-            str_value = str(value).strip().replace("'", "''")
-            formatted_params[sp_param] = str_value
-            
-        elif sp_param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'new_Showroom']:
-            try:
-                if isinstance(value, str):
-                    clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
-                    if validate_quality and (not clean_value or clean_value.lower() in ['n/a', 'na', 'null', 'none']):
-                        stats['skipped_invalid_value'] += 1
-                        skip_row = True
-                        break
-                    numeric_value = float(clean_value)
-                else:
-                    numeric_value = float(value)
-                    
-                if validate_quality and numeric_value < 0 and sp_param in ['qty', 'New_Current_Cost', 'new_Showroom']:
-                    logging.debug(f"Negative value detected for {sp_param}: {numeric_value}")
-                    stats['skipped_invalid_value'] += 1
-                    skip_row = True
-                    break
-                    
-                formatted_params[sp_param] = numeric_value
-                
-            except (ValueError, AttributeError, TypeError) as e:
-                if validate_quality:
-                    logging.debug(f"Invalid numeric value for {sp_param}: '{value}' - {str(e)}")
-                    stats['skipped_invalid_value'] += 1
-                    skip_row = True
-                    break
-                else:
-                    formatted_params[sp_param] = str(value) if value is not None else '0'
-                    
-        else:
-            str_value = str(value).strip().replace("'", "''")
-            formatted_params[sp_param] = str_value
-            
-    return skip_row, formatted_params, stats        
-            
-
-# --- AppController: Connects everything, handles events, signals, slots ---
 class AppController:
-    def __init__(self, window: MainWindow):
+    def __init__(self, window):
         self.window = window
         self.window.controller = self
-        self.excel_loader_thread = None
         self.sql_generator_thread = None
+        self.excel_loader_thread = None
+
     def load_excel_file_threaded(self, file_path):
-        self.window.df_all_sheets.clear()
-        self.window.current_df = None
-        self.window.file_label.setText("Loading Excel file...")
-        self.window.drop_zone.setText("Loading...")
-        self.window.text_output.append(f"Loading: {os.path.basename(file_path)}")
-        self.window.generate_button.setEnabled(False)
+        self.window.text_output.append(f"Loading Excel file: {file_path}")
         self.excel_loader_thread = ExcelLoaderWorker(file_path)
         self.excel_loader_thread.finished.connect(self.on_excel_loaded)
         self.excel_loader_thread.error.connect(self.on_excel_load_error)
         self.excel_loader_thread.start()
-    def on_excel_loaded(self, sheets, sheet_names):
+
+    def on_excel_loaded(self, sheets: Dict[str, object], sheet_names: List[str]) -> None:
+        """
+        Handles UI updates after Excel sheets are successfully loaded.
+
+        Args:
+            sheets: A dictionary mapping sheet names to their DataFrames.
+            sheet_names: A list of non-empty sheet names.
+        """
         self.window.df_all_sheets = sheets
         self.window.add_to_recent_files(self.window.file_path)
+
+        # Handle case: no non-empty sheets found
         if not sheet_names:
             self.window.file_label.setText("No non-empty sheets found.")
             self.window.drop_zone.setText("📂 Drop Excel file here or click to browse")
             self.window.text_output.append("No non-empty sheets found in the file.")
             self.window.generate_button.setEnabled(False)
             return
-        self.window.file_label.setText(f"✔ File loaded: {os.path.basename(self.window.file_path)}")
-        self.window.drop_zone.setText(f"✔ {os.path.basename(self.window.file_path)} loaded")
+
+        # Update labels and drop zone for successful load
+        file_name = os.path.basename(self.window.file_path)
+        self.window.file_label.setText(f"✔ File loaded: {file_name}")
+        self.window.drop_zone.setText(f"✔ {file_name} loaded")
+
+        # Clear previous output and show debug info
         self.window.text_output.clear()
         debug_info = f"Found {len(sheet_names)} non-empty sheet(s): {', '.join(sheet_names)}"
         self.window.text_output.append(debug_info)
+
+        # Update sheet selector dropdown
         self.window.sheet_selector.clear()
         self.window.sheet_selector.addItems(sheet_names)
+
+        # Preserve previous selection if possible
         if self.window.selected_sheet_name and self.window.selected_sheet_name in sheet_names:
             self.window.sheet_selector.setCurrentText(self.window.selected_sheet_name)
         else:
             self.window.sheet_selector.setCurrentIndex(0)
+
+        # Make selector and label visible
         self.window.sheet_selector.show()
         self.window.sheet_label.show()
+
+        # Add context message for user
         if len(sheet_names) > 1:
             self.window.text_output.append("Multiple sheets found - please select one from the dropdown.")
         else:
             self.window.text_output.append("Single sheet found - automatically selected.")
+
+        # Update selected sheet and reload its data
         self.window.selected_sheet_name = self.window.sheet_selector.currentText()
         self.window.reload_sheet_data()
+
+        # Enable generate button after successful load
         self.window.generate_button.setEnabled(True)
+
+        # Reset file path (kept as in original code to avoid breaking other logic)
         self.window.file_path = ""
-    def on_excel_load_error(self, message):
+
+    def on_excel_load_error(self, message, dev_mode=False):
+        # Update UI to prompt the user to retry
         self.window.file_label.setText("Error loading Excel file.")
         self.window.drop_zone.setText("📂 Drop Excel file here or click to browse")
-        self.window.text_output.append(f"Error: {message}")
-        QMessageBox.critical(self.window, "Error", message)
         self.window.generate_button.setEnabled(False)
+
+        # Build a clear error message
+        error_message = f"Failed to load Excel file:\n{message}"
+        log_message = f"Error loading Excel file: {message}"
+
+        # Log the error (always)
+        self.window.text_output.append(log_message)
+
+        # Show a user-friendly error popup
+        QMessageBox.critical(self.window, "Excel Load Error", error_message)
+
+        # Optional: Extra debug output for developers
+        if dev_mode:
+            print(f"[DEBUG] Excel load error: {message}")
+    
     def generate_sql(self):
         if self.sql_generator_thread and self.sql_generator_thread.isRunning():
             QMessageBox.warning(self.window, "Processing in Progress", "A script generation is already in progress. Please wait.")
@@ -1096,6 +971,29 @@ class AppController:
         if not sp_details:
             QMessageBox.critical(self.window, "Invalid Stored Procedure", "Selected Stored Procedure definition not found.")
             return
+
+        # --- Special handling for Update Items Status ---
+        if selected_sp_friendly_name == "Update Items Status":
+            inactive_selected = self.window.inactive_combo.currentText() if self.window.inactive_combo else "-- Select Value --"
+            itemtype_selected = self.window.itemtype_combo.currentText() if self.window.itemtype_combo else "-- Select Value --"
+            sp_details = sp_details.copy()  # Don't modify original
+
+            # Only add fields if user selected a value
+            sql_parts = ["UPDATE IV00101 SET USCATVLS_6 = '{Status}'"]
+            if inactive_selected != "-- Select Value --":
+                inactive_value = inactive_selected.split(":")[0].strip()
+                sql_parts.append(f"INACTIVE = {inactive_value}")
+            if itemtype_selected != "-- Select Value --":
+                itemtype_value = itemtype_selected.split(":")[0].strip()
+                sql_parts.append(f"ITEMTYPE = {itemtype_value}")
+            sql_parts.append("WHERE ITEMNMBR = '{item}'")
+
+            # If only default, keep original template, else build dynamic
+            if len(sql_parts) > 2:
+                sp_details['sql_template'] = ", ".join(sql_parts[:-1]) + " " + sql_parts[-1]
+            else:
+                sp_details['sql_template'] = "UPDATE IV00101 SET USCATVLS_6 = '{Status}' WHERE ITEMNMBR = '{item}'"
+
         column_mappings = {}
         all_mappings_selected = True
         for param, combo in self.window.param_column_combos.items():
@@ -1134,6 +1032,7 @@ class AppController:
         self.sql_generator_thread.finished.connect(self.on_processing_finished)
         self.sql_generator_thread.error.connect(self.on_processing_error)
         self.sql_generator_thread.start()
+        
     def on_processing_finished(self, output_path, sql_lines, stats):
         self.window.progress_bar.hide()
         self.window.status_label.hide()
@@ -1151,7 +1050,7 @@ class AppController:
             f"  - Invalid Quantity/Value: {stats['skipped_invalid_value']}\n"
             f"Skipped Rows (Arabic Text): {stats['skipped_arabic']}\n"
             f"Processing Time: {stats['processing_time']:.2f} seconds\n"
-        )
+            )
         self.window.stats_text.setText(stats_text)
         self.window.text_output.append("\n" + stats_text)
         QMessageBox.information(self.window, "Success", f"SQL script generated successfully to:\n{output_path}")
@@ -1161,9 +1060,8 @@ class AppController:
             'sheet': self.window.selected_sheet_name,
             'sp_name': self.window.sp_selector.currentText(),
             'processed_rows': stats['processed_rows'],
-            'output_path': output_path,
-            'status': 'Success'
-        }
+            'output_path': output_path,                'status': 'Success'
+            }
         self.window.processing_history.append(history_entry)
         self.window.update_history_list()
         self.sql_generator_thread = None
@@ -1181,7 +1079,7 @@ class AppController:
             'processed_rows': 0,
             'output_path': 'N/A',
             'status': f'Failed: {message}'
-        }
+            }
         self.window.processing_history.append(history_entry)
         self.window.update_history_list()
         self.sql_generator_thread = None
