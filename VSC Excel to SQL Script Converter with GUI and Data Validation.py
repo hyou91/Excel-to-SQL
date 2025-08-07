@@ -24,15 +24,115 @@ def resource_path(relative_path):
 #default_excel_template = resource_path("C:\\Users\\alyousefh\\Desktop\\365DataSience\\Python\\VSC\\Excel to SQL\\Default_Excel_template_File.xlsx")
 default_excel_template = resource_path("Default_Excel_template_File.xlsx")
 
+# Add this class after the existing imports and before DataHandler class
+
+class SkippedRowLogger:
+    """Handles logging of skipped rows with detailed information"""
+    
+    def __init__(self, log_file_path="excel_to_sql_skipped.txt"):
+        self.log_file_path = log_file_path
+        self.skipped_rows = []
+        
+    def log_skipped_row(self, row_number, reason, details="", value=""):
+        """Log a skipped row with details"""
+        entry = {
+            'row_number': row_number + 1,
+            'reason': reason,
+            'details': details,
+            'value': str(value)[:100],  # Truncate long values
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        self.skipped_rows.append(entry)
+        
+    def write_log_file(self, sheet_name=""):
+        """Write all skipped rows to log file"""
+        try:
+            with open(self.log_file_path, 'w', encoding='utf-8') as f:
+                f.write(f"Skipped Rows Log - Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Sheet: {sheet_name}\n")
+                f.write("=" * 80 + "\n\n")
+                
+                if not self.skipped_rows:
+                    f.write("No rows were skipped during processing.\n")
+                    return
+                
+                # Group by reason
+                reasons = {}
+                for entry in self.skipped_rows:
+                    reason = entry['reason']
+                    if reason not in reasons:
+                        reasons[reason] = []
+                    reasons[reason].append(entry)
+                
+                for reason, entries in reasons.items():
+                    f.write(f"REASON: {reason}\n")
+                    f.write("-" * 40 + "\n")
+                    for entry in entries:
+                        f.write(f"Row {entry['row_number']}: {entry['details']}")
+                        if entry['value']:
+                            f.write(f" | Value: '{entry['value']}'")
+                        f.write("\n")
+                    f.write("\n")
+                    
+        except Exception as e:
+            logging.error(f"Failed to write skipped rows log: {e}")
+
+
 # --- DataHandler: All Pandas/Excel/JSON logic (no UI code) ---
 class DataHandler:
+    # Update the DataHandler.load_excel_sheets method with better error handling
     @staticmethod
     def load_excel_sheets(file_path):
         try:
-            all_sheets = pd.read_excel(file_path, sheet_name=None)
-            return {name: df for name, df in all_sheets.items() if not df.empty and len(df.columns) > 0}
+            logging.info(f"Loading Excel file: {file_path}")
+            
+            # Check if file exists and is accessible
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+                
+            if not os.access(file_path, os.R_OK):
+                raise PermissionError(f"Cannot read file: {file_path}")
+            
+            # Try to load with different engines if one fails
+            engines = ['openpyxl', 'xlrd']
+            last_error = None
+            
+            for engine in engines:
+                try:
+                    logging.info(f"Trying to load with engine: {engine}")
+                    all_sheets = pd.read_excel(file_path, sheet_name=None, engine=engine)
+                    
+                    # Filter out empty sheets with better validation
+                    valid_sheets = {}
+                    for name, df in all_sheets.items():
+                        if df is not None and not df.empty and len(df.columns) > 0:
+                            # Check if sheet has meaningful data (not just headers)
+                            if len(df.dropna(how='all')) > 0:
+                                valid_sheets[name] = df
+                                logging.info(f"Sheet '{name}' loaded successfully with {len(df)} rows and {len(df.columns)} columns")
+                            else:
+                                logging.warning(f"Sheet '{name}' contains only empty rows, skipping")
+                        else:
+                            logging.warning(f"Sheet '{name}' is empty or invalid, skipping")
+                    
+                    if not valid_sheets:
+                        raise ValueError("No valid sheets found in the Excel file")
+                        
+                    logging.info(f"Successfully loaded {len(valid_sheets)} valid sheets")
+                    return valid_sheets
+                    
+                except Exception as e:
+                    last_error = e
+                    logging.warning(f"Failed to load with engine {engine}: {str(e)}")
+                    continue
+            
+            # If all engines failed, raise the last error
+            raise last_error if last_error else Exception("Failed to load Excel file with any available engine")
+            
         except Exception as e:
-            raise e
+            error_msg = f"Failed to load Excel file '{file_path}': {str(e)}"
+            logging.error(error_msg)
+            raise Exception(error_msg)
 
     @staticmethod
     def get_preview(df, n_rows):
@@ -106,65 +206,129 @@ class DataHandler:
                 
         return skip_row, formatted_params, stats
     
+    # Update the DataHandler.validate_row_by_index method
     @staticmethod
-    def validate_row_by_index(row, column_indices, skip_arabic, validate_quality, arabic_pattern, sp_params):
-        """Validate row using column indices instead of attribute names"""
+    def validate_row_by_index(row, column_indices, skip_arabic, validate_quality, arabic_pattern, sp_params, row_number=0, logger=None):
+        """Validate row using column indices with enhanced error handling and logging"""
         formatted_params = {}
         skip_row = False
         stats = {'skipped_arabic': 0, 'skipped_invalid_value': 0, 'skipped_empty': 0}
         
-        for sp_param, col_index in column_indices.items():
-            # Access value by index position - this always works!
-            value = row[col_index]
-            
-            # Rest of validation logic remains the same...
-            if validate_quality and (pd.isna(value) or (isinstance(value, str) and value.strip().lower() in ['nan', 'none', ''])):
-                stats['skipped_empty'] += 1
-                skip_row = True
-                break
-                
-            if skip_arabic and isinstance(value, str) and arabic_pattern.search(str(value).strip()):
-                stats['skipped_arabic'] += 1
-                skip_row = True
-                break
-                
-            if sp_param in ['Item', 'Status']:
-                str_value = str(value).strip().replace("'", "''")
-                formatted_params[sp_param] = str_value
-                
-            elif sp_param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'New_Showroom']:
+        try:
+            for sp_param, col_index in column_indices.items():
                 try:
-                    if isinstance(value, str):
-                        clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
-                        if validate_quality and (not clean_value or clean_value.lower() in ['n/a', 'na', 'null', 'none']):
-                            stats['skipped_invalid_value'] += 1
-                            skip_row = True
-                            break
-                        numeric_value = float(clean_value)
-                    else:
-                        numeric_value = float(value)
-                        
-                    if validate_quality and numeric_value < 0 and sp_param in ['qty', 'New_Current_Cost', 'New_Showroom']:
-                        logging.debug(f"Negative value detected for {sp_param}: {numeric_value}")
+                    # Safe access to row data with bounds checking
+                    if col_index >= len(row):
+                        if logger:
+                            logger.log_skipped_row(row_number, "COLUMN_INDEX_ERROR", 
+                                                f"Column index {col_index} out of bounds for parameter '{sp_param}'")
                         stats['skipped_invalid_value'] += 1
                         skip_row = True
                         break
                         
-                    formatted_params[sp_param] = numeric_value
+                    value = row[col_index]
                     
-                except (ValueError, AttributeError, TypeError) as e:
+                    # Check for empty/null values
+                    if validate_quality and (pd.isna(value) or (isinstance(value, str) and value.strip().lower() in ['nan', 'none', ''])):
+                        if logger:
+                            logger.log_skipped_row(row_number, "EMPTY_VALUE", 
+                                                f"Empty/null value in parameter '{sp_param}'", value)
+                        stats['skipped_empty'] += 1
+                        skip_row = True
+                        break
+                        
+                    # Check for Arabic text
+                    if skip_arabic and isinstance(value, str) and arabic_pattern.search(str(value).strip()):
+                        if logger:
+                            logger.log_skipped_row(row_number, "ARABIC_TEXT", 
+                                                f"Arabic text found in parameter '{sp_param}'", value)
+                        stats['skipped_arabic'] += 1
+                        skip_row = True
+                        break
+                        
+                    # Handle string parameters
+                    if sp_param in ['Item', 'Status']:
+                        try:
+                            str_value = str(value).strip().replace("'", "''")
+                            formatted_params[sp_param] = str_value
+                        except Exception as e:
+                            if logger:
+                                logger.log_skipped_row(row_number, "STRING_CONVERSION_ERROR", 
+                                                    f"Failed to convert '{sp_param}' to string: {str(e)}", value)
+                            if validate_quality:
+                                stats['skipped_invalid_value'] += 1
+                                skip_row = True
+                                break
+                            else:
+                                formatted_params[sp_param] = str(value) if value is not None else ''
+                                
+                    # Handle numeric parameters
+                    elif sp_param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'New_Showroom']:
+                        try:
+                            if isinstance(value, str):
+                                clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
+                                if validate_quality and (not clean_value or clean_value.lower() in ['n/a', 'na', 'null', 'none']):
+                                    if logger:
+                                        logger.log_skipped_row(row_number, "INVALID_NUMERIC", 
+                                                            f"Invalid numeric value for '{sp_param}'", value)
+                                    stats['skipped_invalid_value'] += 1
+                                    skip_row = True
+                                    break
+                                numeric_value = float(clean_value)
+                            else:
+                                numeric_value = float(value)
+                                
+                            # Validate range
+                            if validate_quality and numeric_value < 0 and sp_param in ['qty', 'New_Current_Cost', 'New_Showroom']:
+                                if logger:
+                                    logger.log_skipped_row(row_number, "NEGATIVE_VALUE", 
+                                                        f"Negative value for '{sp_param}': {numeric_value}", value)
+                                stats['skipped_invalid_value'] += 1
+                                skip_row = True
+                                break
+                                
+                            formatted_params[sp_param] = numeric_value
+                            
+                        except (ValueError, AttributeError, TypeError) as e:
+                            if logger:
+                                logger.log_skipped_row(row_number, "NUMERIC_CONVERSION_ERROR", 
+                                                    f"Failed to convert '{sp_param}' to number: {str(e)}", value)
+                            if validate_quality:
+                                stats['skipped_invalid_value'] += 1
+                                skip_row = True
+                                break
+                            else:
+                                formatted_params[sp_param] = str(value) if value is not None else '0'
+                                
+                    else:
+                        try:
+                            str_value = str(value).strip().replace("'", "''")
+                            formatted_params[sp_param] = str_value
+                        except Exception as e:
+                            if logger:
+                                logger.log_skipped_row(row_number, "GENERAL_CONVERSION_ERROR", 
+                                                    f"Failed to process '{sp_param}': {str(e)}", value)
+                            formatted_params[sp_param] = str(value) if value is not None else ''
+                            
+                except Exception as e:
+                    if logger:
+                        logger.log_skipped_row(row_number, "PARAMETER_PROCESSING_ERROR", 
+                                            f"Error processing parameter '{sp_param}': {str(e)}", 
+                                            str(value) if 'value' in locals() else 'N/A')
+                    logging.error(f"Error processing parameter '{sp_param}' in row {row_number}: {e}")
                     if validate_quality:
-                        logging.debug(f"Invalid numeric value for {sp_param}: '{value}' - {str(e)}")
                         stats['skipped_invalid_value'] += 1
                         skip_row = True
                         break
-                    else:
-                        formatted_params[sp_param] = str(value) if value is not None else '0'
                         
-            else:
-                str_value = str(value).strip().replace("'", "''")
-                formatted_params[sp_param] = str_value
-                
+        except Exception as e:
+            if logger:
+                logger.log_skipped_row(row_number, "ROW_PROCESSING_ERROR", 
+                                    f"Critical error processing row: {str(e)}")
+            logging.error(f"Critical error processing row {row_number}: {e}")
+            stats['skipped_invalid_value'] += 1
+            skip_row = True
+            
         return skip_row, formatted_params, stats
     
     
@@ -197,12 +361,17 @@ class SQLGeneratorWorker(QThread):
         self.output_path = output_path
         self.skip_arabic = skip_arabic
         self.validate_quality = validate_quality
+    # Update the SQLGeneratorWorker.run method
     def run(self):
         try:
             start_time = datetime.now()
             arabic_pattern = re.compile(r'[\u0600-\u06FF]')
             sql_lines = []
             total_rows = len(self.df)
+            
+            # Initialize skipped row logger
+            logger = SkippedRowLogger()
+            
             stats = {
                 'total_rows': total_rows,
                 'processed_rows': 0,
@@ -212,56 +381,125 @@ class SQLGeneratorWorker(QThread):
                 'processing_time': 0
             }
             
-            # Convert column names to indices for reliable access
-            column_indices = {}
-            df_columns = list(self.df.columns)
-            for sp_param, excel_col in self.column_mappings.items():
-                if excel_col in df_columns:
-                    column_indices[sp_param] = df_columns.index(excel_col)
-                else:
-                    raise ValueError(f"Column '{excel_col}' not found in DataFrame columns: {df_columns}")
+            try:
+                # Convert column names to indices with better error handling
+                column_indices = {}
+                df_columns = list(self.df.columns)
+                
+                for sp_param, excel_col in self.column_mappings.items():
+                    if excel_col in df_columns:
+                        column_indices[sp_param] = df_columns.index(excel_col)
+                    else:
+                        error_msg = f"Column '{excel_col}' not found in DataFrame. Available columns: {df_columns}"
+                        logging.error(error_msg)
+                        self.error.emit(error_msg)
+                        return
+                        
+            except Exception as e:
+                error_msg = f"Error setting up column mappings: {str(e)}"
+                logging.error(error_msg)
+                self.error.emit(error_msg)
+                return
             
-            # Use itertuples for performance
-            for idx, row in enumerate(self.df.itertuples(index=False), 1):
-                progress = int((idx / total_rows) * 100)
-                self.progress.emit(progress)
-                if idx % 100 == 0:
-                    self.status_update.emit(f"Processing row {idx} of {total_rows}")
-                
-                skip_row, formatted_params, row_stats = DataHandler.validate_row_by_index(
-                    row, column_indices, self.skip_arabic, self.validate_quality, arabic_pattern, self.sp_details['parameters']
-                )
-                
-                stats['skipped_arabic'] += row_stats['skipped_arabic']
-                stats['skipped_invalid_value'] += row_stats['skipped_invalid_value']
-                stats['skipped_empty'] += row_stats['skipped_empty']
-                if skip_row:
-                    continue
-                try:
-                    sql = self.sp_details['sql_template'].format(**formatted_params)
-                    sql_lines.append(sql)
-                    stats['processed_rows'] += 1
-                except KeyError as e:
-                    self.error.emit(f"Missing parameter for SQL formatting: {e}. Check column mappings.")
-                    return
-                except Exception as e:
-                    self.error.emit(f"Error formatting SQL for row {idx}: {e}")
-                    return
+            # Process rows with enhanced error handling
+            processed_count = 0
+            error_count = 0
+            max_errors = 100  # Stop processing if too many errors
+            
+            try:
+                # Use itertuples for performance but with error handling
+                for idx, row in enumerate(self.df.itertuples(index=False), 1):
+                    try:
+                        progress = int((idx / total_rows) * 100)
+                        self.progress.emit(progress)
+                        
+                        if idx % 100 == 0:
+                            self.status_update.emit(f"Processing row {idx} of {total_rows} (Processed: {processed_count}, Errors: {error_count})")
+                        
+                        skip_row, formatted_params, row_stats = DataHandler.validate_row_by_index(
+                            row, column_indices, self.skip_arabic, self.validate_quality, 
+                            arabic_pattern, self.sp_details['parameters'], row_number=idx, logger=logger
+                        )
+                        
+                        # Update stats
+                        stats['skipped_arabic'] += row_stats['skipped_arabic']
+                        stats['skipped_invalid_value'] += row_stats['skipped_invalid_value']
+                        stats['skipped_empty'] += row_stats['skipped_empty']
+                        
+                        if skip_row:
+                            continue
+                            
+                        try:
+                            sql = self.sp_details['sql_template'].format(**formatted_params)
+                            sql_lines.append(sql)
+                            stats['processed_rows'] += 1
+                            processed_count += 1
+                            
+                        except KeyError as e:
+                            logger.log_skipped_row(idx, "SQL_TEMPLATE_ERROR", 
+                                                f"Missing parameter for SQL formatting: {e}")
+                            error_count += 1
+                            
+                        except Exception as e:
+                            logger.log_skipped_row(idx, "SQL_FORMATTING_ERROR", 
+                                                f"Error formatting SQL: {str(e)}")
+                            error_count += 1
+                            
+                    except Exception as e:
+                        logger.log_skipped_row(idx, "ROW_PROCESSING_CRITICAL_ERROR", 
+                                            f"Critical error processing row: {str(e)}")
+                        error_count += 1
+                        logging.error(f"Critical error processing row {idx}: {e}")
+                        
+                        # Stop processing if too many errors
+                        if error_count >= max_errors:
+                            error_msg = f"Too many errors ({error_count}). Stopping processing to prevent system issues."
+                            logging.error(error_msg)
+                            self.error.emit(error_msg)
+                            return
+                            
+            except Exception as e:
+                error_msg = f"Critical error during row iteration: {str(e)}\n{traceback.format_exc()}"
+                logging.error(error_msg)
+                self.error.emit(error_msg)
+                return
+            
+            # Write the skipped rows log
+            try:
+                logger.write_log_file(self.sheet_name)
+                logging.info(f"Skipped rows log written with {len(logger.skipped_rows)} entries")
+            except Exception as e:
+                logging.error(f"Failed to write skipped rows log: {e}")
+            
+            # Write SQL output file
             try:
                 with open(self.output_path, 'w', encoding='utf-8') as f:
                     f.write(f"-- Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write(f"-- Source Excel Sheet: {self.sheet_name}\n")
                     f.write(f"-- Stored Procedure/SQL Type: {self.sp_details.get('friendly_name', 'Unknown')}\n")
-                    f.write(f"-- Total statements: {len(sql_lines)}\n\n")
+                    f.write(f"-- Total statements: {len(sql_lines)}\n")
+                    f.write(f"-- Processing errors: {error_count}\n")
+                    f.write(f"-- See excel_to_sql_skipped.txt for skipped rows details\n\n")
+                    
                     for line in sql_lines:
                         f.write(line + '\nGO\n')
+                        
             except Exception as e:
-                self.error.emit(f"File write error: {e}")
+                error_msg = f"File write error: {str(e)}"
+                logging.error(error_msg)
+                self.error.emit(error_msg)
                 return
+            
             stats['processing_time'] = (datetime.now() - start_time).total_seconds()
+            stats['total_errors'] = error_count
+            stats['skipped_rows_logged'] = len(logger.skipped_rows)
+            
             self.finished.emit(self.output_path, sql_lines, stats)
+            
         except Exception as e:
-            self.error.emit(str(e))
+            error_msg = f"Unexpected error in SQL generation: {str(e)}\n{traceback.format_exc()}"
+            logging.error(error_msg)
+            self.error.emit(error_msg)
 
 # --- ColorDelegate: For preview table coloring ---
 class ColorDelegate(QStyledItemDelegate):
@@ -347,10 +585,10 @@ class MainWindow(QWidget):
         # This will log to both a file and the console
         logging.basicConfig(
             level=logging.DEBUG,
-            format='%(asctime)s - %(levelname)s - %(message)s',
+            format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
             handlers=[
-                logging.FileHandler('excel_to_sql.log'),
-                logging.StreamHandler()  # Also print to console
+                logging.FileHandler('excel_to_sql.log', encoding='utf-8'),
+                logging.StreamHandler()
             ]
         )
         
@@ -670,6 +908,8 @@ class MainWindow(QWidget):
     def on_sheet_changed(self):
         self.selected_sheet_name = self.sheet_selector.currentText()
         self.reload_sheet_data()
+    # Replace the on_sp_changed method in MainWindow class (around line 930)
+
     def on_sp_changed(self):
         # Clear existing mappings
         while self.mapping_widgets_layout.count():
@@ -695,9 +935,16 @@ class MainWindow(QWidget):
                 self.param_column_combos[param] = combo
                 if self.current_df_columns:
                     for i, col_name in enumerate(self.current_df_columns):
-                        if col_name.lower() == param.lower():
-                            combo.setCurrentIndex(i + 1)
-                            break
+                        # Convert both to strings and then compare (case-insensitive)
+                        try:
+                            if str(col_name).lower() == param.lower():
+                                combo.setCurrentIndex(i + 1)
+                                break
+                        except (AttributeError, TypeError):
+                            # If comparison fails, try exact match
+                            if str(col_name) == param:
+                                combo.setCurrentIndex(i + 1)
+                                break
             
             # Add special options for "Update Items Status"
             if selected_sp_friendly_name == "Update Items Status":
@@ -723,6 +970,8 @@ class MainWindow(QWidget):
             self.file_label.setText("No sheet selected or sheet not found.")
             self.table_output.clear()
             self.stats_text.clear()
+    # Also update the reload_sheet_data method around line 970 to handle column names better:
+
     def reload_sheet_data(self):
         if not self.selected_sheet_name or self.selected_sheet_name not in self.df_all_sheets:
             self.text_output.append("No sheet selected or sheet data not available for preview.")
@@ -733,39 +982,62 @@ class MainWindow(QWidget):
             self.on_sp_changed()
             self.generate_button.setEnabled(False)
             return
-        self.current_df = self.df_all_sheets[self.selected_sheet_name]
-        self.current_df_columns = list(self.current_df.columns)
-        self.on_sp_changed()
-        self.color_delegate.error_rows.clear()
-        self.color_delegate.warning_rows.clear()
-        self.color_delegate.arabic_rows.clear()
-        preview_rows_count = self.preview_rows_spin.value()
-        df_preview = self.current_df.head(preview_rows_count)
-        self.table_output.setRowCount(df_preview.shape[0])
-        self.table_output.setColumnCount(df_preview.shape[1])
-        self.table_output.setHorizontalHeaderLabels(df_preview.columns)
-        self.table_output.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        arabic_pattern = re.compile(r'[\u0600-\u06FF]')
-        for r_idx, row in enumerate(df_preview.itertuples(index=False)):
-            for c_idx, col_name in enumerate(df_preview.columns):
-                value = row[c_idx]  # <-- Use index-based access, always works
-                item = QTableWidgetItem(str(value))
-                self.table_output.setItem(r_idx, c_idx, item)
-                if self.validate_data_check.isChecked():
-                    if pd.isna(value) or str(value).strip().lower() in ['nan', 'none', '']:
+            
+        try:
+            self.current_df = self.df_all_sheets[self.selected_sheet_name]
+            # Ensure column names are strings for consistency
+            self.current_df_columns = [str(col) for col in self.current_df.columns]
+            self.on_sp_changed()
+            
+            self.color_delegate.error_rows.clear()
+            self.color_delegate.warning_rows.clear()
+            self.color_delegate.arabic_rows.clear()
+            
+            preview_rows_count = self.preview_rows_spin.value()
+            df_preview = self.current_df.head(preview_rows_count)
+            self.table_output.setRowCount(df_preview.shape[0])
+            self.table_output.setColumnCount(df_preview.shape[1])
+            self.table_output.setHorizontalHeaderLabels([str(col) for col in df_preview.columns])
+            self.table_output.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            
+            arabic_pattern = re.compile(r'[\u0600-\u06FF]')
+            for r_idx, row in enumerate(df_preview.itertuples(index=False)):
+                for c_idx, col_name in enumerate(df_preview.columns):
+                    try:
+                        value = row[c_idx]
+                        item = QTableWidgetItem(str(value))
+                        self.table_output.setItem(r_idx, c_idx, item)
+                        
+                        if self.validate_data_check.isChecked():
+                            if pd.isna(value) or str(value).strip().lower() in ['nan', 'none', '']:
+                                self.color_delegate.error_rows.add(r_idx)
+                            elif isinstance(value, str) and arabic_pattern.search(value):
+                                self.color_delegate.arabic_rows.add(r_idx)
+                    except Exception as e:
+                        # Handle any cell-level errors gracefully
+                        item = QTableWidgetItem("ERROR")
+                        self.table_output.setItem(r_idx, c_idx, item)
                         self.color_delegate.error_rows.add(r_idx)
-                    elif isinstance(value, str) and arabic_pattern.search(value):
-                        self.color_delegate.arabic_rows.add(r_idx)
-        self.table_output.viewport().update()
-        total_rows = len(self.current_df)
-        self.stats_text.setText(
-            f"--- Sheet Statistics: {self.selected_sheet_name} ---\n"
-            f"Total Rows: {total_rows}\n"
-            f"Total Columns: {len(self.current_df_columns)}\n"
-            f"Columns: {', '.join(self.current_df_columns)}\n"
-            f"\n(Note: Detailed processing statistics will be available after generating SQL script.)"
-        )
-        self.generate_button.setEnabled(True)
+                        logging.warning(f"Error processing cell [{r_idx}, {c_idx}]: {e}")
+            
+            self.table_output.viewport().update()
+            
+            total_rows = len(self.current_df)
+            self.stats_text.setText(
+                f"--- Sheet Statistics: {self.selected_sheet_name} ---\n"
+                f"Total Rows: {total_rows}\n"
+                f"Total Columns: {len(self.current_df_columns)}\n"
+                f"Columns: {', '.join(self.current_df_columns)}\n"
+                f"\n(Note: Detailed processing statistics will be available after generating SQL script.)"
+            )
+            self.generate_button.setEnabled(True)
+            
+        except Exception as e:
+            error_msg = f"Error loading sheet '{self.selected_sheet_name}': {str(e)}"
+            logging.error(error_msg)
+            self.text_output.append(error_msg)
+            QMessageBox.warning(self, "Sheet Load Error", error_msg)
+            self.generate_button.setEnabled(False)
     def controller_generate_sql(self):
         logging.debug("Generate SQL button clicked - testing logging")
         self.controller.generate_sql()
@@ -787,80 +1059,80 @@ class MainWindow(QWidget):
             self.history_list.addItem(item_text)
     # Add this method to MainWindow class around line 575
 
-def validate_column_mappings(self, column_mappings):
-    """Validate that column mappings make sense based on data types"""
-    
-    if not self.current_df or self.current_df.empty:
+    def validate_column_mappings(self, column_mappings):
+        """Validate that column mappings make sense based on data types"""
+        
+        if not self.current_df or self.current_df.empty:
+            return True, ""
+        
+        validation_errors = []
+        sample_size = min(100, len(self.current_df))  # Check first 100 rows for performance
+        df_sample = self.current_df.head(sample_size)
+        
+        for param, excel_col in column_mappings.items():
+            if excel_col == "-- Select Column --":
+                continue
+                
+            try:
+                # Get the actual column data
+                if excel_col not in df_sample.columns:
+                    validation_errors.append(f"Column '{excel_col}' not found in Excel sheet")
+                    continue
+                    
+                column_data = df_sample[excel_col].dropna()  # Remove NaN for analysis
+                
+                if column_data.empty:
+                    validation_errors.append(f"Column '{excel_col}' mapped to '{param}' contains only empty values")
+                    continue
+                
+                # Validate based on parameter type
+                if param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'New_Showroom']:
+                    # Should be numeric
+                    numeric_count = 0
+                    non_numeric_examples = []
+                    
+                    for idx, value in column_data.head(20).items():  # Check first 20 non-null values
+                        try:
+                            if isinstance(value, str):
+                                # Try to clean and convert
+                                clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
+                                float(clean_value)
+                            else:
+                                float(value)
+                            numeric_count += 1
+                        except (ValueError, TypeError):
+                            if len(non_numeric_examples) < 3:  # Collect up to 3 examples
+                                non_numeric_examples.append(str(value)[:20])  # Truncate long values
+                    
+                    # If less than 70% are numeric, warn user
+                    if numeric_count < len(column_data.head(20)) * 0.7:
+                        examples_str = ", ".join(f"'{ex}'" for ex in non_numeric_examples)
+                        validation_errors.append(
+                            f"Parameter '{param}' expects numeric values, but column '{excel_col}' contains "
+                            f"non-numeric data. Examples: {examples_str}"
+                        )
+                        
+                elif param in ['Item', 'Status']:
+                    # Should be text-like
+                    text_count = 0
+                    for value in column_data.head(10):
+                        if isinstance(value, (str, int, float)) and str(value).strip():
+                            text_count += 1
+                    
+                    if text_count == 0:
+                        validation_errors.append(
+                            f"Parameter '{param}' expects text values, but column '{excel_col}' appears to be empty or invalid"
+                        )
+                        
+            except Exception as e:
+                validation_errors.append(f"Error analyzing column '{excel_col}' for parameter '{param}': {str(e)}")
+        
+        if validation_errors:
+            error_message = "Column Mapping Issues Found:\n\n" + "\n".join(f"• {error}" for error in validation_errors)
+            error_message += "\n\nPlease review your column mappings and try again."
+            return False, error_message
+        
         return True, ""
-    
-    validation_errors = []
-    sample_size = min(100, len(self.current_df))  # Check first 100 rows for performance
-    df_sample = self.current_df.head(sample_size)
-    
-    for param, excel_col in column_mappings.items():
-        if excel_col == "-- Select Column --":
-            continue
-            
-        try:
-            # Get the actual column data
-            if excel_col not in df_sample.columns:
-                validation_errors.append(f"Column '{excel_col}' not found in Excel sheet")
-                continue
-                
-            column_data = df_sample[excel_col].dropna()  # Remove NaN for analysis
-            
-            if column_data.empty:
-                validation_errors.append(f"Column '{excel_col}' mapped to '{param}' contains only empty values")
-                continue
-            
-            # Validate based on parameter type
-            if param in ['qty', 'Slp_Discount', 'Spv_Discount', 'Mgr_Discount', 'New_Current_Cost', 'New_Showroom']:
-                # Should be numeric
-                numeric_count = 0
-                non_numeric_examples = []
-                
-                for idx, value in column_data.head(20).items():  # Check first 20 non-null values
-                    try:
-                        if isinstance(value, str):
-                            # Try to clean and convert
-                            clean_value = value.replace(",", "").replace("$", "").replace("%", "").strip()
-                            float(clean_value)
-                        else:
-                            float(value)
-                        numeric_count += 1
-                    except (ValueError, TypeError):
-                        if len(non_numeric_examples) < 3:  # Collect up to 3 examples
-                            non_numeric_examples.append(str(value)[:20])  # Truncate long values
-                
-                # If less than 70% are numeric, warn user
-                if numeric_count < len(column_data.head(20)) * 0.7:
-                    examples_str = ", ".join(f"'{ex}'" for ex in non_numeric_examples)
-                    validation_errors.append(
-                        f"Parameter '{param}' expects numeric values, but column '{excel_col}' contains "
-                        f"non-numeric data. Examples: {examples_str}"
-                    )
-                    
-            elif param in ['Item', 'Status']:
-                # Should be text-like
-                text_count = 0
-                for value in column_data.head(10):
-                    if isinstance(value, (str, int, float)) and str(value).strip():
-                        text_count += 1
-                
-                if text_count == 0:
-                    validation_errors.append(
-                        f"Parameter '{param}' expects text values, but column '{excel_col}' appears to be empty or invalid"
-                    )
-                    
-        except Exception as e:
-            validation_errors.append(f"Error analyzing column '{excel_col}' for parameter '{param}': {str(e)}")
-    
-    if validation_errors:
-        error_message = "Column Mapping Issues Found:\n\n" + "\n".join(f"• {error}" for error in validation_errors)
-        error_message += "\n\nPlease review your column mappings and try again."
-        return False, error_message
-    
-    return True, ""
 
 class AppController:
     def __init__(self, window):
